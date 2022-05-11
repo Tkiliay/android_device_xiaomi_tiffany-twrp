@@ -18,7 +18,7 @@ if [ -f system/build.prop ]; then
 else
     sdk=$(cat system/system/build.prop | grep ro.build.version.sdk | cut -d'=' -f2)
     if [ "$sdk" -ge "29" ]; then
-    	echo "Detected  Android 10 ROM"
+    	echo "Detected  Android 10+ ROM"
     else
 	    echo "System sdk below 29"
     	umount system
@@ -38,9 +38,20 @@ fstab="system/system/vendor/etc/fstab.qcom"
 
 sed -i 's/,slotselect//g' $fstab
 sed -i 's/,verify//g' $fstab
+sed -i 's/,avb//g' $fstab
 sed -i 's/forceencrypt/encryptable/g' $fstab
 sed -i 's/fileencryption=ice/encryptable=footer/g' $fstab
-cp system/system/vendor/etc/fstab.qcom /sdcard/output
+sed -i '/mnt_point/{n;/system/d;}' $fstab
+sed -i '/mnt_point/a\/dev/block/bootdevice/by-name/system		/system			ext4	ro								wait,recoveryonly' $fstab
+sed -i '/mnt_point/G' $fstab
+sed -i '/mnt_point/a\/dev/block/bootdevice/by-name/recovery		/recovery		emmc	defaults							defaults' $fstab
+sed -i '/mnt_point/a\/dev/block/bootdevice/by-name/boot		/boot			emmc	defaults							defaults' $fstab
+sed -i '/persist/i\/dev/block/bootdevice/by-name/cache		/cache			f2fs	nosuid,nodev,noatime,inline_xattr,flush_merge,data_flush	wait,formattable,check' $fstab
+sed -i '/cache/a\/dev/block/bootdevice/by-name/cache		/cache			ext4	nosuid,nodev,noatime						wait,formattable,check' $fstab
+sed -i '/modem/d' $fstab
+sed -i '/misc/i\/dev/block/bootdevice/by-name/modem		/vendor/firmware_mnt		vfat	ro,context=u:object_r:firmware_file:s0,shortname=lower,uid=1000,gid=1000,dmask=227,fmask=337 wait' $fstab
+cp system/system/vendor/etc/fstab.qcom /sdcard/output/
+cat system/system/vendor/etc/fstab.qcom
 
 echo "Unmounting system"
 umount system
@@ -51,50 +62,55 @@ cd boot
 split-appended-dtb zImage
 rm zImage
 
-temp=$(ls -lS *.dtb | head -1 | awk '{print $8}')
-echo temp: $temp
-dtb=${temp##* }
-dts=${dtb%.*}.dts
-echo dtb: $dtb
-echo dts: $dts
-dtc -q -I dtb -O dts -o $dts $dtb
-rm $dtb
-echo rm: $dtb
-
-sed -i '/parts/{n;d;}' $dts
-sed -i '/vbmeta/d' $dts
-sed -i '/android,system/{n;d;}' $dts
-sed -i '/android,system/{n;d;}' $dts
-sed -i '/android,system/{n;d;}' $dts
-sed -i '/android,system/d' $dts
-sed -i '/,discard/{n;s/,slotselect//;}' *.dts
-sed -i 'N;/\n.*,slotselect/!P;D' $dts
-sed -i '/,slotselect/{n;d;}' $dts
-sed -i '/,slotselect/{n;d;}' $dts
-sed -i '/,slotselect/d' $dts
-sed -i '/,fstab/a\				system {\
-					compatible = "android,system";\
-					dev = "/dev/block/platform/soc/7824900.sdhci/by-name/system";\
-					type = "ext4";\
-					mnt_flags = "ro,barrier=1,discard";\
-					fsmgr_flags = "wait";\
-					status = "ok";\
-				};' $dts
-sed -i '/,fstab/G' $dts
-sed -i '/android,firmware/{n;d;}' $dts
-sed -i 's/,avb//g' $dts
-sed -i '/,slotselect/{n;s/disable/ok/;}' $dts
-sed -i 's/,slotselect//g' $dts
-sed -i '$a\};' $dts
-
-dtc -q -I dts -O dtb -o $dtb $dts
-mv $dts /sdcard/output
-
-cat kernel *.dtb > zImage
-rm kernel
-rm *.dtb
+for i in `find *.dtb`; do
+if [[ ! -z "$(fdtget $i /firmware/android/fstab -p 2>/dev/null || true)" ]]; then
+    echo "**************************************"
+    magiskboot dtb $i print -f
+    echo "**************************************"
+    fdtget $i /firmware/android/vbmeta parts 2>/dev/null || true
+    fdtput $i -r /firmware/android/vbmeta
+    fdtput $i /firmware/android/fstab/system status -d
+    fdtput $i /firmware/android/fstab/system fsmgr_flags -d
+    fdtput $i /firmware/android/fstab/system status ok -ts
+    fdtput $i /firmware/android/fstab/system fsmgr_flags wait -ts
+    fdtput $i /firmware/android/fstab/system mnt_flags ro,barrier=1,discard -ts
+    fdtput $i /firmware/android/fstab/system type ext4 -ts
+    fdtput $i /firmware/android/fstab/system dev /dev/block/platform/soc/7824900.sdhci/by-name/system -ts
+    fdtput $i /firmware/android/fstab/system compatible android,system -ts
+    fdtput $i /firmware/android/fstab/vendor fsmgr_flags wait -ts
+    fdtput $i /firmware/android/fstab/vendor status disable -ts
+    echo "列出android下的节点"
+    fdtget $i /firmware/android/vbmeta -l 2>/dev/null || true
+    fdtget $i /firmware/android/vbmeta parts 2>/dev/null || true
+    echo "**************************************"
+    magiskboot dtb $i print -f
+    echo "**************************************"
+    dtb=${i##* }
+    dts=${dtb%.*}.dts
+    echo "dtb $dtb"
+    echo "dts $dts"
+    dtc -q -I dtb -O dts -o $dts $dtb
+    line="$(grep -n "firmware {" $dts)"
+    linea="$(echo $line | cut -d ":" -f 1)"
+    line="$(grep -n "reserved-memory" $dts)"
+    lineb="$(echo $line | cut -d ":" -f 1)"
+    lineb="`expr $lineb - 1`""p"
+    echo "**************************************"
+    sed -n "$linea,$lineb" $dts
+    echo "**************************************"
+    mv $dts /sdcard/output/
+fi
+done
+echo "**************************************"
 ls -al
-
+echo "**************************************"
+cat kernel *.dtb > zImage
+rm -f *.dtb
+rm -f kernel
+echo "列出所有文件"
+echo "**************************************"
+ls -al
+echo "**************************************"
 cd ..
 
 echo "Removing veritykeyid from cmdline"
